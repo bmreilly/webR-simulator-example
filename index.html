@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Interactive PK Simulation with Base R Plot</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 950px; margin: 40px auto; padding: 0 20px; color: #333; }
+    .layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+    .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; display: grid; gap: 15px; border: 1px solid #e5e7eb; }
+    .control-group { display: flex; flex-direction: column; gap: 5px; }
+    label { font-weight: 600; font-size: 0.9rem; }
+    .plot-container { background: #fff; border: 1px solid #e5e7eb; padding: 20px; border-radius: 8px; text-align: center; }
+    canvas { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; background: #fafafa; }
+    #status { font-weight: 500; color: #2563eb; margin-bottom: 15px; }
+  </style>
+</head>
+<body>
+
+  <h2>Interactive PopPK Simulation & Base R Plot (webR + deSolve)</h2>
+  <div id="status">Loading webR environment... Please wait.</div>
+
+  <div class="layout">
+    <!-- Patient Covariate Controls -->
+    <div class="controls">
+      <div class="control-group">
+        <label for="weight">Body Weight (kg): <span id="weight-val">70</span> kg</label>
+        <input type="range" id="weight" min="40" max="140" value="70" step="1" disabled>
+      </div>
+
+      <div class="control-group">
+        <label for="sex">Biological Sex:</label>
+        <select id="sex" disabled>
+          <option value="male">Male (Factor: 1.0)</option>
+          <option value="female">Female (Factor: 0.85)</option>
+        </select>
+      </div>
+
+      <hr style="border: 0; border-top: 1px solid #ddd; margin: 5px 0;">
+      
+      <div id="info" style="font-size: 0.85rem; color: #4b5563; line-height: 1.4;">
+        <i>Awaiting simulation data...</i>
+      </div>
+    </div>
+
+    <!-- Plot Area -->
+    <div class="plot-container">
+      <h3 style="margin-top: 0; font-size: 1.1rem;">Plasma Concentration Profile</h3>
+      <canvas id="plotCanvas" width="600" height="450"></canvas>
+    </div>
+  </div>
+
+  <script type="module">
+    import { WebR } from 'https://webr.r-wasm.org/latest/webr.mjs';
+
+    let webr;
+    let canvasEl = document.getElementById('plotCanvas');
+    let ctx = canvasEl.getContext('2d');
+
+    async function init() {
+      webr = new WebR();
+      await webr.init();
+      
+      document.getElementById('status').innerText = "Installing deSolve package...";
+      await webr.installPackages(['deSolve']);
+      
+      // Configure R to use webR's native canvas graphics device by default
+      await webr.evalRVoid('options(device = webr::canvas)');
+
+      document.getElementById('status').innerText = "Ready!";
+      document.getElementById('weight').disabled = false;
+      document.getElementById('sex').disabled = false;
+
+      runSimulation();
+    }
+
+    async function processWebRMessages() {
+      // Flush message queue to catch canvas painting triggers from R
+      const messages = await webr.flush();
+      for (const msg of messages) {
+        if (msg.type === 'canvas') {
+          if (msg.data.event === 'canvasNewPage') {
+            ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+          } else if (msg.data.event === 'canvasImage') {
+            ctx.drawImage(msg.data.image, 0, 0);
+          }
+        }
+      }
+    }
+
+    async function runSimulation() {
+      const weight = document.getElementById('weight').value;
+      const sex = document.getElementById('sex').value;
+      
+      document.getElementById('weight-val').innerText = weight;
+      document.getElementById('status').innerText = "Running simulation...";
+
+      // Execute simulation and standard base R plotting commands
+      await webr.evalRVoid(`
+        library(deSolve)
+
+        wt_input <- ${weight}
+        sex_input <- "${sex}"
+
+        tvcl <- 3.5  
+        tvv  <- 25   
+        ka   <- 1.2  
+        
+        sex_mult <- if(sex_input == "female") 0.85 else 1.0
+        cl_ind <- tvcl * (wt_input / 70)^0.75 * sex_mult
+        v_ind  <- tvv  * (wt_input / 70)^1.0  
+
+        pk_model <- function(time, state, parameters) {
+          with(as.list(c(state, parameters)), {
+            d_gut <- -ka * gut
+            d_central <- ka * gut - (cl / v) * central
+            list(c(d_gut, d_central))
+          })
+        }
+
+        parameters <- c(ka = ka, cl = cl_ind, v = v_ind)
+        state <- c(gut = 100, central = 0)
+        times <- seq(0, 24, by = 0.5)
+
+        out <- as.data.frame(ode(y = state, times = times, func = pk_model, parms = parameters))
+        out$Conc <- out$central / v_ind
+
+        # Standard Base R Graphics Call
+        plot(out$time, out$Conc, type = "l", lwd = 3, col = "#2563eb",
+             xlab = "Time (hours)", ylab = "Concentration (mg/L)",
+             main = sprintf("Oral PK Profile (CL: %.2f L/h, V: %.2f L)", cl_ind, v_ind))
+        grid(col = "lightgray", lty = "dotted")
+      `);
+
+      // Capture and render the generated plot onto the HTML canvas element
+      await processWebRMessages();
+
+      // Fetch calculated individual parameters to display in the UI sidebar
+      const clVal = Number(await webr.evalR('cl_ind')).toFixed(2);
+      const vVal = Number(await webr.evalR('v_ind')).toFixed(2);
+
+      document.getElementById('info').innerHTML = `
+        <strong>Individual Parameters:</strong><br>
+        • Clearance (CL): <strong>${clVal} L/h</strong><br>
+        • Volume (V): <strong>${vVal} L</strong>
+      `;
+      document.getElementById('status').innerText = "Simulation updated successfully.";
+    }
+
+    // Attach reactive event listeners
+    document.getElementById('weight').addEventListener('input', runSimulation);
+    document.getElementById('sex').addEventListener('change', runSimulation);
+
+    init();
+  </script>
+
+</body>
+</html>
