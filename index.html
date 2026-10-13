@@ -16,7 +16,7 @@
 </head>
 <body>
 
-  <h2>Interactive PopPK Simulation & Base R Plot (webR + deSolve)</h2>
+  <h2>Interactive PopPK Simulation & Base R Plot (webR)</h2>
   <div id="status">Loading webR environment... Please wait.</div>
 
   <div class="layout">
@@ -59,11 +59,7 @@
     async function init() {
       webr = new WebR();
       await webr.init();
-      
-      document.getElementById('status').innerText = "Installing deSolve package...";
-      await webr.installPackages(['deSolve']);
-      
-      // Configure R to use webR's native canvas graphics device by default
+
       await webr.evalRVoid('options(device = webr::canvas)');
 
       document.getElementById('status').innerText = "Ready!";
@@ -74,7 +70,6 @@
     }
 
     async function processWebRMessages() {
-      // Flush message queue to catch canvas painting triggers from R
       const messages = await webr.flush();
       for (const msg of messages) {
         if (msg.type === 'canvas') {
@@ -88,65 +83,71 @@
     }
 
     async function runSimulation() {
-      const weight = document.getElementById('weight').value;
+      const weight = Number(document.getElementById('weight').value);
       const sex = document.getElementById('sex').value;
-      
+
       document.getElementById('weight-val').innerText = weight;
       document.getElementById('status').innerText = "Running simulation...";
 
-      // Execute simulation and standard base R plotting commands
-      await webr.evalRVoid(`
-        library(deSolve)
+      try {
+        await webr.evalRVoid(`
+          wt_input <- ${weight}
+          sex_input <- "${sex}"
 
-        wt_input <- ${weight}
-        sex_input <- "${sex}"
+          tvcl <- 3.5
+          tvv <- 25
+          ka <- 1.2
 
-        tvcl <- 3.5  
-        tvv  <- 25   
-        ka   <- 1.2  
-        
-        sex_mult <- if(sex_input == "female") 0.85 else 1.0
-        cl_ind <- tvcl * (wt_input / 70)^0.75 * sex_mult
-        v_ind  <- tvv  * (wt_input / 70)^1.0  
+          sex_mult <- if (sex_input == "female") 0.85 else 1.0
+          cl_ind <- tvcl * (wt_input / 70)^0.75 * sex_mult
+          v_ind <- tvv * (wt_input / 70)^1.0
 
-        pk_model <- function(time, state, parameters) {
-          with(as.list(c(state, parameters)), {
-            d_gut <- -ka * gut
-            d_central <- ka * gut - (cl / v) * central
-            list(c(d_gut, d_central))
-          })
-        }
+          dt <- 0.05
+          times <- seq(0, 24, by = dt)
+          gut <- numeric(length(times))
+          central <- numeric(length(times))
+          gut[1] <- 100
+          central[1] <- 0
 
-        parameters <- c(ka = ka, cl = cl_ind, v = v_ind)
-        state <- c(gut = 100, central = 0)
-        times <- seq(0, 24, by = 0.5)
+          for (i in 2:length(times)) {
+            d_gut <- -ka * gut[i - 1]
+            d_central <- ka * gut[i - 1] - (cl_ind / v_ind) * central[i - 1]
+            gut[i] <- gut[i - 1] + d_gut * dt
+            central[i] <- central[i - 1] + d_central * dt
+          }
 
-        out <- as.data.frame(ode(y = state, times = times, func = pk_model, parms = parameters))
-        out$Conc <- out$central / v_ind
+          out <- data.frame(
+            time = times,
+            gut = gut,
+            central = central,
+            Conc = central / v_ind
+          )
 
-        # Standard Base R Graphics Call
-        plot(out$time, out$Conc, type = "l", lwd = 3, col = "#2563eb",
-             xlab = "Time (hours)", ylab = "Concentration (mg/L)",
-             main = sprintf("Oral PK Profile (CL: %.2f L/h, V: %.2f L)", cl_ind, v_ind))
-        grid(col = "lightgray", lty = "dotted")
-      `);
+          plot(out$time, out$Conc, type = "l", lwd = 3, col = "#2563eb",
+               xlab = "Time (hours)", ylab = "Concentration (mg/L)",
+               main = sprintf("Oral PK Profile (CL: %.2f L/h, V: %.2f L)", cl_ind, v_ind))
+          grid(col = "lightgray", lty = "dotted")
+        `);
 
-      // Capture and render the generated plot onto the HTML canvas element
-      await processWebRMessages();
+        await processWebRMessages();
 
-      // Fetch calculated individual parameters to display in the UI sidebar
-      const clVal = Number(await webr.evalR('cl_ind')).toFixed(2);
-      const vVal = Number(await webr.evalR('v_ind')).toFixed(2);
+        const sexMultiplier = sex === 'female' ? 0.85 : 1.0;
+        const clVal = (3.5 * Math.pow(weight / 70, 0.75) * sexMultiplier).toFixed(2);
+        const vVal = (25 * (weight / 70)).toFixed(2);
 
-      document.getElementById('info').innerHTML = `
-        <strong>Individual Parameters:</strong><br>
-        • Clearance (CL): <strong>${clVal} L/h</strong><br>
-        • Volume (V): <strong>${vVal} L</strong>
-      `;
-      document.getElementById('status').innerText = "Simulation updated successfully.";
+        document.getElementById('info').innerHTML = `
+          <strong>Individual Parameters:</strong><br>
+          • Clearance (CL): <strong>${clVal} L/h</strong><br>
+          • Volume (V): <strong>${vVal} L</strong>
+        `;
+        document.getElementById('status').innerText = "Simulation updated successfully.";
+      } catch (error) {
+        console.error(error);
+        document.getElementById('info').innerHTML = `<strong>Simulation error:</strong><br>${error}`;
+        document.getElementById('status').innerText = "Simulation failed. See console for details.";
+      }
     }
 
-    // Attach reactive event listeners
     document.getElementById('weight').addEventListener('input', runSimulation);
     document.getElementById('sex').addEventListener('change', runSimulation);
 
